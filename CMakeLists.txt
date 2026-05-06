@@ -9,15 +9,21 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
 set(SOURCES
     src/main.cpp
     src/views/mainwindow.cpp
+    src/viewmodels/packetsummarytablemodel.cpp
+    src/services/packetcaptureservice.cpp
 )
 
 set(HEADERS
     include/views/mainwindow.h
+    include/viewmodels/packetsummarytablemodel.h
+    include/models/core/packetsummary.h
+    include/models/core/networkinterface.h
+    include/services/packetcaptureservice.h
 )
 
 qt_add_executable(${PROJECT_NAME}
@@ -33,4 +39,5 @@ target_include_directories(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME}
     PRIVATE
         Qt6::Widgets
+        Qt6::Network
 )

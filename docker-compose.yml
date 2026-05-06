@@ -9,6 +9,9 @@ services:
     working_dir: /app
     ports:
       - "5901:5900"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     command: >
       bash -lc "
       export DISPLAY=:99;

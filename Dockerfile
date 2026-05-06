@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11vnc \
     xauth \
     libqt6sql6-mysql \
+    tshark \
+    tcpdump \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
