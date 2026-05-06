@@ -1,0 +1,11 @@
+build/
+.idea/
+.vscode/
+*.user
+*.pro.user
+*.autosave
+*.o
+*.obj
+*.exe
+*.dll
+*.log
