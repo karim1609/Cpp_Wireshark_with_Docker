@@ -2,10 +2,15 @@
 
 #include <QNetworkInterface>
 #include <QStandardPaths>
+#include <QTimer>
 
 PacketCaptureService::PacketCaptureService(QObject *parent)
     : QObject(parent)
 {
+    connect(&m_captureProcess, &QProcess::started, this, [this]() {
+        emit captureStateChanged(true);
+    });
+
     connect(&m_captureProcess, &QProcess::readyReadStandardOutput, this, [this]() {
         m_stdoutBuffer.append(QString::fromUtf8(m_captureProcess.readAllStandardOutput()));
         int newlineIndex = m_stdoutBuffer.indexOf('\n');
@@ -112,15 +117,6 @@ bool PacketCaptureService::startCapture(const QString &interfaceName, const QStr
     m_stdoutBuffer.clear();
     const QStringList args = buildCaptureArguments(interfaceName, filterExpression);
     m_captureProcess.start(m_captureExecutable, args);
-
-    const bool started = m_captureProcess.waitForStarted(2000);
-    if (!started) {
-        emit captureError(QString("Could not launch %1 for packet capture.").arg(m_captureExecutable));
-        emit captureStateChanged(false);
-        return false;
-    }
-
-    emit captureStateChanged(true);
     return true;
 }
 
@@ -131,10 +127,11 @@ void PacketCaptureService::stopCapture()
     }
 
     m_captureProcess.terminate();
-    if (!m_captureProcess.waitForFinished(1500)) {
-        m_captureProcess.kill();
-        m_captureProcess.waitForFinished(500);
-    }
+    QTimer::singleShot(1500, this, [this]() {
+        if (m_captureProcess.state() != QProcess::NotRunning) {
+            m_captureProcess.kill();
+        }
+    });
 }
 
 bool PacketCaptureService::isCapturing() const

@@ -83,3 +83,16 @@ void PacketSummaryTableModel::clear()
     m_packets.clear();
     endResetModel();
 }
+
+PacketSummary PacketSummaryTableModel::packetAt(int row) const
+{
+    if (row < 0 || row >= m_packets.size()) {
+        return {};
+    }
+    return m_packets.at(row);
+}
+
+QVector<PacketSummary> PacketSummaryTableModel::packets() const
+{
+    return m_packets;
+}

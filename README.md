@@ -43,3 +43,6 @@ cmake --build build -j
 2. Convert captured packets to `Packet` model objects.
 3. Insert packets into MySQL using the DB layer.
 4. Show packet list/details in the Qt view.
+to run:
+docker compose down -v
+docker compose up --build --force-recreate

@@ -20,6 +20,8 @@ public:
     void setPackets(QVector<PacketSummary> packets);
     void appendPacket(const PacketSummary &packet);
     void clear();
+    PacketSummary packetAt(int row) const;
+    QVector<PacketSummary> packets() const;
 
 private:
     QVector<PacketSummary> m_packets;

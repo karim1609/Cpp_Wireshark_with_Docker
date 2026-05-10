@@ -1,4 +1,22 @@
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: wirescope_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: packet_capture_db
+      MYSQL_USER: wireshark_user
+      MYSQL_PASSWORD: wireshark_password
+    volumes:
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
   app:
     build:
       context: .
@@ -9,6 +27,9 @@ services:
     working_dir: /app
     ports:
       - "5901:5900"
+    depends_on:
+      mysql:
+        condition: service_healthy
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -22,3 +43,6 @@ services:
       cmake --build build -j &&
       ./build/WireScope
       "
+
+volumes:
+  mysql_data:

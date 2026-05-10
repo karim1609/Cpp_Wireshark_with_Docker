@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     x11vnc \
     xauth \
-    libqt6sql6-mysql \
+    libmysqlcppconn-dev \
     tshark \
     tcpdump \
     pkg-config \

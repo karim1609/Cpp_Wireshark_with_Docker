@@ -16,6 +16,7 @@ set(SOURCES
     src/views/mainwindow.cpp
     src/viewmodels/packetsummarytablemodel.cpp
     src/services/packetcaptureservice.cpp
+    src/db/databasemanager.cpp
 )
 
 set(HEADERS
@@ -24,6 +25,8 @@ set(HEADERS
     include/models/core/packetsummary.h
     include/models/core/networkinterface.h
     include/services/packetcaptureservice.h
+    include/db/databasemanager.h
+    include/models/session/capturesession.h
 )
 
 qt_add_executable(${PROJECT_NAME}
@@ -40,4 +43,5 @@ target_link_libraries(${PROJECT_NAME}
     PRIVATE
         Qt6::Widgets
         Qt6::Network
+        mysqlcppconn
 )

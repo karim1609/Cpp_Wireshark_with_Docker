@@ -1,8 +1,10 @@
 #include "views/mainwindow.h"
 
+#include <QAbstractItemView>
 #include <QComboBox>
 #include <QDateTime>
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -11,6 +13,10 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSplitter>
+#include <QScreen>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QThread>
 #include <QTabWidget>
 #include <QTableView>
 #include <QTreeWidget>
@@ -19,8 +25,10 @@
 #include <QVector>
 #include <QWidget>
 
+#include "db/databasemanager.h"
 #include "models/core/networkinterface.h"
 #include "models/core/packetsummary.h"
+#include "models/session/capturesession.h"
 #include "services/packetcaptureservice.h"
 #include "viewmodels/packetsummarytablemodel.h"
 
@@ -29,21 +37,39 @@ MainWindow::MainWindow(QWidget *parent)
       m_packetTable(new QTableView(this)),
       m_packetTableModel(new PacketSummaryTableModel(this)),
       m_captureService(new PacketCaptureService(this)),
+      m_databaseManager(new DatabaseManager()),
       m_interfaceCombo(nullptr),
+      m_sessionCombo(nullptr),
       m_filterInput(nullptr),
       m_captureButton(nullptr),
-      m_pauseButton(nullptr),
+      m_stopCaptureButton(nullptr),
+      m_loadSessionButton(nullptr),
+      m_saveSelectedButton(nullptr),
+      m_dbRefreshButton(nullptr),
+      m_dbDeleteSessionButton(nullptr),
       m_consoleLog(nullptr),
       m_throughputValue(nullptr),
       m_throughputGraph(nullptr),
-      m_recentPacketCount(0)
+      m_rootTabs(nullptr),
+      m_dbSessionsTable(nullptr),
+      m_dbPacketsTable(nullptr),
+      m_recentPacketCount(0),
+      m_activeSessionId(-1),
+      m_dbReady(false)
 {
     auto *centralWidget = new QWidget(this);
     auto *layout = new QVBoxLayout(centralWidget);
     layout->setContentsMargins(12, 10, 12, 12);
     layout->setSpacing(10);
+    m_rootTabs = new QTabWidget(centralWidget);
+    layout->addWidget(m_rootTabs);
 
-    auto *topBar = new QFrame(centralWidget);
+    auto *capturePage = new QWidget(m_rootTabs);
+    auto *captureLayout = new QVBoxLayout(capturePage);
+    captureLayout->setContentsMargins(0, 0, 0, 0);
+    captureLayout->setSpacing(10);
+
+    auto *topBar = new QFrame(capturePage);
     auto *topBarLayout = new QHBoxLayout(topBar);
     topBarLayout->setContentsMargins(0, 0, 0, 0);
     topBarLayout->setSpacing(10);
@@ -51,18 +77,27 @@ MainWindow::MainWindow(QWidget *parent)
     auto *ifaceLabel = new QLabel("IFACE:", topBar);
     m_interfaceCombo = new QComboBox(topBar);
     m_interfaceCombo->setObjectName("chip");
+    auto *sessionLabel = new QLabel("Session:", topBar);
+    m_sessionCombo = new QComboBox(topBar);
+    m_sessionCombo->setObjectName("chip");
+    m_loadSessionButton = new QPushButton("Load Session", topBar);
+    m_saveSelectedButton = new QPushButton("Save Selected", topBar);
     m_filterInput = new QLineEdit(topBar);
     m_filterInput->setPlaceholderText("tcp or port 443");
     m_filterInput->setText("tcp");
     m_captureButton = new QPushButton("Capture", topBar);
-    m_pauseButton = new QPushButton("Stop", topBar);
+    m_stopCaptureButton = new QPushButton("Stop Capturing", topBar);
 
     topBarLayout->addWidget(ifaceLabel);
     topBarLayout->addWidget(m_interfaceCombo);
+    topBarLayout->addWidget(sessionLabel);
+    topBarLayout->addWidget(m_sessionCombo);
+    topBarLayout->addWidget(m_loadSessionButton);
+    topBarLayout->addWidget(m_saveSelectedButton);
     topBarLayout->addSpacing(8);
     topBarLayout->addWidget(m_filterInput, 1);
     topBarLayout->addWidget(m_captureButton);
-    topBarLayout->addWidget(m_pauseButton);
+    topBarLayout->addWidget(m_stopCaptureButton);
 
     m_packetTable->setModel(m_packetTableModel);
     m_packetTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -70,10 +105,10 @@ MainWindow::MainWindow(QWidget *parent)
     m_packetTable->horizontalHeader()->setStretchLastSection(true);
     m_packetTable->verticalHeader()->setVisible(false);
     m_packetTable->setShowGrid(false);
-    m_packetTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_packetTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_packetTable->setSortingEnabled(false);
 
-    auto *detailTabs = new QTabWidget(centralWidget);
+    auto *detailTabs = new QTabWidget(capturePage);
     auto *detailsTree = new QTreeWidget(detailTabs);
     detailsTree->setHeaderHidden(true);
     auto *ethernetRoot = new QTreeWidgetItem(detailsTree, {"Ethernet II, Src: Apple_f2:31:1a, Dst: Netgear_02:21:4b"});
@@ -108,13 +143,13 @@ MainWindow::MainWindow(QWidget *parent)
     detailTabs->addTab(rawBytes, "Raw Bytes");
     detailTabs->addTab(streamView, "Streams");
 
-    auto *mainSplitter = new QSplitter(Qt::Horizontal, centralWidget);
+    auto *mainSplitter = new QSplitter(Qt::Horizontal, capturePage);
     mainSplitter->addWidget(m_packetTable);
     mainSplitter->addWidget(detailTabs);
     mainSplitter->setStretchFactor(0, 3);
     mainSplitter->setStretchFactor(1, 2);
 
-    auto *bottomRow = new QSplitter(Qt::Horizontal, centralWidget);
+    auto *bottomRow = new QSplitter(Qt::Horizontal, capturePage);
 
     auto *throughputCard = new QFrame(bottomRow);
     auto *throughputLayout = new QVBoxLayout(throughputCard);
@@ -146,13 +181,60 @@ MainWindow::MainWindow(QWidget *parent)
     bottomRow->setStretchFactor(0, 1);
     bottomRow->setStretchFactor(1, 3);
 
-    layout->addWidget(topBar);
-    layout->addWidget(mainSplitter, 1);
-    layout->addWidget(bottomRow);
+    captureLayout->addWidget(topBar);
+    captureLayout->addWidget(mainSplitter, 1);
+    captureLayout->addWidget(bottomRow);
+    m_rootTabs->addTab(capturePage, "Capture");
+
+    auto *databasePage = new QWidget(m_rootTabs);
+    auto *databaseLayout = new QVBoxLayout(databasePage);
+    databaseLayout->setContentsMargins(0, 0, 0, 0);
+    databaseLayout->setSpacing(10);
+
+    auto *dbToolbar = new QFrame(databasePage);
+    auto *dbToolbarLayout = new QHBoxLayout(dbToolbar);
+    dbToolbarLayout->setContentsMargins(0, 0, 0, 0);
+    dbToolbarLayout->setSpacing(10);
+    m_dbRefreshButton = new QPushButton("Refresh DB", dbToolbar);
+    m_dbDeleteSessionButton = new QPushButton("Delete Session", dbToolbar);
+    dbToolbarLayout->addWidget(m_dbRefreshButton);
+    dbToolbarLayout->addWidget(m_dbDeleteSessionButton);
+    dbToolbarLayout->addStretch(1);
+
+    auto *dbSplitter = new QSplitter(Qt::Vertical, databasePage);
+    m_dbSessionsTable = new QTableWidget(dbSplitter);
+    m_dbSessionsTable->setColumnCount(7);
+    m_dbSessionsTable->setHorizontalHeaderLabels({"ID", "Interface", "Filter", "Started", "Ended", "Packets", "Active"});
+    m_dbSessionsTable->horizontalHeader()->setStretchLastSection(true);
+    m_dbSessionsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_dbSessionsTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_dbSessionsTable->verticalHeader()->setVisible(false);
+    m_dbSessionsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    m_dbPacketsTable = new QTableWidget(dbSplitter);
+    m_dbPacketsTable->setColumnCount(7);
+    m_dbPacketsTable->setHorizontalHeaderLabels({"#", "Time", "Source", "Destination", "Protocol", "Length", "Info"});
+    m_dbPacketsTable->horizontalHeader()->setStretchLastSection(true);
+    m_dbPacketsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_dbPacketsTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_dbPacketsTable->verticalHeader()->setVisible(false);
+    m_dbPacketsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    dbSplitter->setStretchFactor(0, 1);
+    dbSplitter->setStretchFactor(1, 2);
+    databaseLayout->addWidget(dbToolbar);
+    databaseLayout->addWidget(dbSplitter, 1);
+    m_rootTabs->addTab(databasePage, "Database");
+
     setCentralWidget(centralWidget);
 
-    setWindowTitle("WireScope");
-    resize(1360, 760);
+    setWindowTitle("NetScope");
+    constexpr int preferredWidth = 1360;
+    constexpr int preferredHeight = 760;
+    const QRect availableScreen = QGuiApplication::primaryScreen()->availableGeometry();
+    const int width = qMin(preferredWidth, availableScreen.width() - 32);
+    const int height = qMin(preferredHeight, availableScreen.height() - 32);
+    resize(width, height);
 
     setStyleSheet(
         "QMainWindow { background: #07131f; color: #d2e1ef; }"
@@ -191,13 +273,65 @@ MainWindow::MainWindow(QWidget *parent)
         if (!filterText.isEmpty()) {
             appendConsoleEvent(QString("INFO: Applied BPF Filter: %1").arg(filterText));
         }
-
         m_captureService->startCapture(interfaceName, filterText);
     });
 
-    connect(m_pauseButton, &QPushButton::clicked, this, [this]() {
+    connect(m_stopCaptureButton, &QPushButton::clicked, this, [this]() {
         m_captureService->stopCapture();
         appendConsoleEvent("INFO: Capture stopped.");
+    });
+
+    connect(m_loadSessionButton, &QPushButton::clicked, this, [this]() {
+        loadSessionIntoLiveTable(selectedSessionId());
+    });
+
+    connect(m_saveSelectedButton, &QPushButton::clicked, this, [this]() {
+        saveSelectedPacketsToDatabase();
+    });
+
+    connect(m_dbRefreshButton, &QPushButton::clicked, this, [this]() {
+        refreshDatabasePage();
+        appendConsoleEvent("INFO: Database page refreshed.");
+    });
+
+    connect(m_dbDeleteSessionButton, &QPushButton::clicked, this, [this]() {
+        if (!m_dbReady) {
+            appendConsoleEvent("ERROR: Database is not connected.");
+            return;
+        }
+        const int row = m_dbSessionsTable->currentRow();
+        if (row < 0) {
+            appendConsoleEvent("WARN: Select a DB session to delete.");
+            return;
+        }
+        const qint64 sessionId = m_dbSessionsTable->item(row, 0)->text().toLongLong();
+        if (!m_databaseManager->deleteSession(sessionId)) {
+            appendConsoleEvent("ERROR: Failed to delete session: " + m_databaseManager->lastError());
+            return;
+        }
+        appendConsoleEvent(QString("INFO: Session %1 deleted from DB.").arg(sessionId));
+        refreshSessions();
+        refreshDatabasePage();
+    });
+
+    auto loadSelectedDbSessionPackets = [this]() {
+        const int row = m_dbSessionsTable->currentRow();
+        if (row < 0) {
+            m_dbPacketsTable->setRowCount(0);
+            return;
+        }
+        QTableWidgetItem *idItem = m_dbSessionsTable->item(row, 0);
+        if (idItem == nullptr) {
+            m_dbPacketsTable->setRowCount(0);
+            return;
+        }
+        const qint64 sessionId = idItem->text().toLongLong();
+        loadDatabaseSessionPackets(sessionId);
+    };
+
+    connect(m_dbSessionsTable, &QTableWidget::itemSelectionChanged, this, loadSelectedDbSessionPackets);
+    connect(m_dbSessionsTable, &QTableWidget::cellClicked, this, [loadSelectedDbSessionPackets](int, int) {
+        loadSelectedDbSessionPackets();
     });
 
     connect(m_captureService, &PacketCaptureService::packetCaptured, this, [this](const PacketSummary &packet) {
@@ -225,7 +359,12 @@ MainWindow::MainWindow(QWidget *parent)
         }
     });
 
+    m_dbReady = initializeDatabase();
     refreshInterfaces();
+    if (m_dbReady) {
+        refreshSessions();
+        refreshDatabasePage();
+    }
     appendConsoleEvent("INFO: Ready. Select an interface and press Capture.");
     applyCaptureState(false);
 }
@@ -235,6 +374,7 @@ MainWindow::~MainWindow()
     if (m_captureService != nullptr && m_captureService->isCapturing()) {
         m_captureService->stopCapture();
     }
+    delete m_databaseManager;
 }
 
 void MainWindow::refreshInterfaces()
@@ -262,6 +402,157 @@ void MainWindow::refreshInterfaces()
     }
 }
 
+void MainWindow::refreshSessions()
+{
+    if (!m_dbReady) {
+        m_sessionCombo->clear();
+        m_sessionCombo->addItem("DB unavailable", -1);
+        return;
+    }
+
+    const QVector<CaptureSession> sessions = m_databaseManager->fetchSessions();
+    m_sessionCombo->clear();
+    for (const CaptureSession &session : sessions) {
+        const QString startedAtText = session.startedAt.toLocalTime().toString("yyyy-MM-dd hh:mm:ss");
+        const QString title = QString("#%1 %2 | %3 | packets: %4")
+                                  .arg(session.id)
+                                  .arg(session.interfaceName)
+                                  .arg(startedAtText)
+                                  .arg(session.packetCount);
+        m_sessionCombo->addItem(title, session.id);
+    }
+
+    if (m_sessionCombo->count() == 0) {
+        m_sessionCombo->addItem("No saved captures", -1);
+    }
+}
+
+void MainWindow::refreshDatabasePage()
+{
+    if (!m_dbReady) {
+        m_dbSessionsTable->setRowCount(0);
+        m_dbPacketsTable->setRowCount(0);
+        return;
+    }
+
+    const QVector<CaptureSession> sessions = m_databaseManager->fetchSessions(500);
+    m_dbSessionsTable->setRowCount(sessions.size());
+    for (int row = 0; row < sessions.size(); ++row) {
+        const CaptureSession &session = sessions.at(row);
+        m_dbSessionsTable->setItem(row, 0, new QTableWidgetItem(QString::number(session.id)));
+        m_dbSessionsTable->setItem(row, 1, new QTableWidgetItem(session.interfaceName));
+        m_dbSessionsTable->setItem(row, 2, new QTableWidgetItem(session.filterExpression));
+        m_dbSessionsTable->setItem(row, 3, new QTableWidgetItem(session.startedAt.toLocalTime().toString("yyyy-MM-dd hh:mm:ss")));
+        m_dbSessionsTable->setItem(row, 4, new QTableWidgetItem(session.endedAt.toLocalTime().toString("yyyy-MM-dd hh:mm:ss")));
+        m_dbSessionsTable->setItem(row, 5, new QTableWidgetItem(QString::number(session.packetCount)));
+        m_dbSessionsTable->setItem(row, 6, new QTableWidgetItem(session.active ? "Yes" : "No"));
+    }
+    m_dbPacketsTable->setRowCount(0);
+    if (!sessions.isEmpty()) {
+        m_dbSessionsTable->setCurrentCell(0, 0);
+        loadDatabaseSessionPackets(sessions.first().id);
+    }
+}
+
+void MainWindow::saveSelectedPacketsToDatabase()
+{
+    if (!m_dbReady) {
+        appendConsoleEvent("ERROR: Database is not connected.");
+        return;
+    }
+
+    const QModelIndexList selectedRows = m_packetTable->selectionModel()->selectedRows();
+    if (selectedRows.isEmpty()) {
+        appendConsoleEvent("WARN: Select one or more packets to save.");
+        return;
+    }
+
+    const QString interfaceName = selectedInterfaceName().isEmpty() ? "manual" : selectedInterfaceName();
+    const QString filterText = m_filterInput->text().trimmed();
+    const qint64 sessionId = m_databaseManager->createSession(interfaceName, filterText);
+    if (sessionId <= 0) {
+        appendConsoleEvent("ERROR: Failed to create DB session: " + m_databaseManager->lastError());
+        return;
+    }
+
+    qint64 savedCount = 0;
+    for (const QModelIndex &index : selectedRows) {
+        const PacketSummary packet = m_packetTableModel->packetAt(index.row());
+        if (m_databaseManager->insertPacket(sessionId, packet)) {
+            ++savedCount;
+        }
+    }
+    m_databaseManager->closeSession(sessionId, savedCount);
+    appendConsoleEvent(QString("INFO: Saved %1 selected packets to DB session %2.").arg(savedCount).arg(sessionId));
+    refreshSessions();
+    refreshDatabasePage();
+}
+
+void MainWindow::loadSessionIntoLiveTable(qint64 sessionId)
+{
+    if (!m_dbReady) {
+        appendConsoleEvent("ERROR: Database is not connected.");
+        return;
+    }
+    if (sessionId <= 0) {
+        appendConsoleEvent("WARN: Please select a saved session to load.");
+        return;
+    }
+
+    const QVector<PacketSummary> packets = m_databaseManager->fetchPackets(sessionId);
+    m_packetTableModel->setPackets(packets);
+    m_recentPacketCount = packets.size();
+    const double throughputMbps = qMin(99.9, m_recentPacketCount * 0.35);
+    m_throughputValue->setText(QString::number(throughputMbps, 'f', 1) + " Mbps");
+    m_throughputGraph->setValue(static_cast<int>(throughputMbps));
+    appendConsoleEvent(QString("INFO: Loaded %1 packets from session %2.").arg(packets.size()).arg(sessionId));
+    m_rootTabs->setCurrentIndex(0);
+}
+
+void MainWindow::loadDatabaseSessionPackets(qint64 sessionId)
+{
+    if (!m_dbReady || sessionId <= 0) {
+        m_dbPacketsTable->setRowCount(0);
+        return;
+    }
+    const QVector<PacketSummary> packets = m_databaseManager->fetchPackets(sessionId, 10000);
+    m_dbPacketsTable->setRowCount(packets.size());
+    for (int row = 0; row < packets.size(); ++row) {
+        const PacketSummary &packet = packets.at(row);
+        m_dbPacketsTable->setItem(row, 0, new QTableWidgetItem(QString::number(packet.packetNumber)));
+        m_dbPacketsTable->setItem(row, 1, new QTableWidgetItem(packet.timeText));
+        m_dbPacketsTable->setItem(row, 2, new QTableWidgetItem(packet.source));
+        m_dbPacketsTable->setItem(row, 3, new QTableWidgetItem(packet.destination));
+        m_dbPacketsTable->setItem(row, 4, new QTableWidgetItem(packet.protocol));
+        m_dbPacketsTable->setItem(row, 5, new QTableWidgetItem(QString::number(packet.length)));
+        m_dbPacketsTable->setItem(row, 6, new QTableWidgetItem(packet.info));
+    }
+}
+
+bool MainWindow::initializeDatabase()
+{
+    constexpr int maxAttempts = 15;
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+        const bool connected =
+            m_databaseManager->connect("mysql", 3306, "packet_capture_db", "wireshark_user", "wireshark_password");
+        if (connected) {
+            appendConsoleEvent("INFO: MySQL connected. Captures will be saved.");
+            return true;
+        }
+
+        if (attempt == 1 || attempt % 5 == 0) {
+            appendConsoleEvent(
+                QString("WARN: Waiting for MySQL (%1/%2): %3")
+                    .arg(attempt)
+                    .arg(maxAttempts)
+                    .arg(m_databaseManager->lastError()));
+        }
+        QThread::msleep(1000);
+    }
+    appendConsoleEvent("WARN: MySQL unavailable: " + m_databaseManager->lastError());
+    return false;
+}
+
 void MainWindow::appendConsoleEvent(const QString &message)
 {
     const QString timestamp = QDateTime::currentDateTime().toString("hh:mm:ss");
@@ -271,9 +562,12 @@ void MainWindow::appendConsoleEvent(const QString &message)
 void MainWindow::applyCaptureState(bool capturing)
 {
     m_captureButton->setEnabled(!capturing);
-    m_pauseButton->setEnabled(capturing);
+    m_stopCaptureButton->setEnabled(capturing);
+    m_saveSelectedButton->setEnabled(!capturing && m_dbReady);
     m_interfaceCombo->setEnabled(!capturing);
     m_filterInput->setEnabled(!capturing);
+    m_sessionCombo->setEnabled(!capturing);
+    m_loadSessionButton->setEnabled(!capturing && m_dbReady);
 }
 
 QString MainWindow::selectedInterfaceName() const
@@ -283,4 +577,13 @@ QString MainWindow::selectedInterfaceName() const
         return {};
     }
     return m_interfaceCombo->currentData().toString();
+}
+
+qint64 MainWindow::selectedSessionId() const
+{
+    const int selectedIndex = m_sessionCombo->currentIndex();
+    if (selectedIndex < 0) {
+        return -1;
+    }
+    return m_sessionCombo->currentData().toLongLong();
 }
