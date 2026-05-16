@@ -1,6 +1,9 @@
 #include "views/mainwindow.h"
 
 #include <QAbstractItemView>
+#include <QFormLayout>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QComboBox>
 #include <QDateTime>
 #include <QFrame>
@@ -9,6 +12,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QSharedPointer>
+#include <QStandardPaths>
+#include <QSysInfo>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
@@ -47,12 +55,19 @@ MainWindow::MainWindow(QWidget *parent)
       m_saveSelectedButton(nullptr),
       m_dbRefreshButton(nullptr),
       m_dbDeleteSessionButton(nullptr),
+    m_wifiRefreshButton(nullptr),
+    m_speedTestButton(nullptr),
       m_consoleLog(nullptr),
       m_throughputValue(nullptr),
       m_throughputGraph(nullptr),
+    m_wifiSsidValue(nullptr),
+    m_wifiSignalValue(nullptr),
+    m_wifiRadioValue(nullptr),
+    m_speedTestValue(nullptr),
       m_rootTabs(nullptr),
       m_dbSessionsTable(nullptr),
       m_dbPacketsTable(nullptr),
+    m_wifiLog(nullptr),
       m_recentPacketCount(0),
       m_activeSessionId(-1),
       m_dbReady(false)
@@ -186,6 +201,62 @@ MainWindow::MainWindow(QWidget *parent)
     captureLayout->addWidget(bottomRow);
     m_rootTabs->addTab(capturePage, "Capture");
 
+    auto *networkPage = new QWidget(m_rootTabs);
+    auto *networkLayout = new QVBoxLayout(networkPage);
+    networkLayout->setContentsMargins(0, 0, 0, 0);
+    networkLayout->setSpacing(10);
+
+    auto *networkToolbar = new QFrame(networkPage);
+    auto *networkToolbarLayout = new QHBoxLayout(networkToolbar);
+    networkToolbarLayout->setContentsMargins(0, 0, 0, 0);
+    networkToolbarLayout->setSpacing(10);
+    m_wifiRefreshButton = new QPushButton("Check Wi-Fi", networkToolbar);
+    m_speedTestButton = new QPushButton("Run Speed Test", networkToolbar);
+    networkToolbarLayout->addWidget(m_wifiRefreshButton);
+    networkToolbarLayout->addWidget(m_speedTestButton);
+    networkToolbarLayout->addStretch(1);
+
+    auto *networkCards = new QSplitter(Qt::Horizontal, networkPage);
+
+    auto *wifiCard = new QFrame(networkCards);
+    auto *wifiLayout = new QVBoxLayout(wifiCard);
+    wifiLayout->setContentsMargins(10, 8, 10, 10);
+    wifiLayout->setSpacing(8);
+    wifiLayout->addWidget(new QLabel("Wi-Fi signal", wifiCard));
+
+    auto *wifiForm = new QFormLayout();
+    wifiForm->setLabelAlignment(Qt::AlignLeft);
+    m_wifiSsidValue = new QLabel("Unknown", wifiCard);
+    m_wifiSignalValue = new QLabel("--", wifiCard);
+    m_wifiRadioValue = new QLabel("Unknown", wifiCard);
+    wifiForm->addRow("SSID:", m_wifiSsidValue);
+    wifiForm->addRow("Signal:", m_wifiSignalValue);
+    wifiForm->addRow("Radio:", m_wifiRadioValue);
+    wifiLayout->addLayout(wifiForm);
+    wifiLayout->addStretch(1);
+
+    auto *speedCard = new QFrame(networkCards);
+    auto *speedLayout = new QVBoxLayout(speedCard);
+    speedLayout->setContentsMargins(10, 8, 10, 10);
+    speedLayout->setSpacing(8);
+    speedLayout->addWidget(new QLabel("Speed test", speedCard));
+    m_speedTestValue = new QLabel("Idle", speedCard);
+    m_speedTestValue->setObjectName("metric");
+    speedLayout->addWidget(m_speedTestValue);
+    m_wifiLog = new QPlainTextEdit(speedCard);
+    m_wifiLog->setReadOnly(true);
+    m_wifiLog->setPlaceholderText("Wi-Fi and speed test output will appear here.");
+    speedLayout->addWidget(m_wifiLog, 1);
+
+    networkCards->addWidget(wifiCard);
+    networkCards->addWidget(speedCard);
+    networkCards->setStretchFactor(0, 1);
+    networkCards->setStretchFactor(1, 2);
+
+    networkLayout->addWidget(networkToolbar);
+    networkLayout->addWidget(networkCards, 1);
+    m_rootTabs->addTab(networkPage, "Wi-Fi");
+
     auto *databasePage = new QWidget(m_rootTabs);
     auto *databaseLayout = new QVBoxLayout(databasePage);
     databaseLayout->setContentsMargins(0, 0, 0, 0);
@@ -314,6 +385,14 @@ MainWindow::MainWindow(QWidget *parent)
         refreshDatabasePage();
     });
 
+    connect(m_wifiRefreshButton, &QPushButton::clicked, this, [this]() {
+        refreshWifiStatus();
+    });
+
+    connect(m_speedTestButton, &QPushButton::clicked, this, [this]() {
+        runSpeedTest();
+    });
+
     auto loadSelectedDbSessionPackets = [this]() {
         const int row = m_dbSessionsTable->currentRow();
         if (row < 0) {
@@ -365,6 +444,7 @@ MainWindow::MainWindow(QWidget *parent)
         refreshSessions();
         refreshDatabasePage();
     }
+    refreshWifiStatus();
     appendConsoleEvent("INFO: Ready. Select an interface and press Capture.");
     applyCaptureState(false);
 }
@@ -586,4 +666,233 @@ qint64 MainWindow::selectedSessionId() const
         return -1;
     }
     return m_sessionCombo->currentData().toLongLong();
+}
+
+void MainWindow::refreshWifiStatus()
+{
+    if (m_wifiLog != nullptr) {
+        m_wifiLog->clear();
+        m_wifiLog->appendPlainText("Checking Wi-Fi status...");
+    }
+
+    const bool isWindows = QSysInfo::productType().contains("windows", Qt::CaseInsensitive);
+    const QString command = isWindows ? QStandardPaths::findExecutable("netsh")
+                                      : QStandardPaths::findExecutable("iwconfig");
+    const QString toolName = isWindows ? "netsh" : "iwconfig";
+    if (command.isEmpty()) {
+        m_wifiSsidValue->setText(toolName + " not found");
+        m_wifiSignalValue->setText("Unavailable");
+        m_wifiRadioValue->setText("Unavailable");
+        appendConsoleEvent(QString("WARN: %1 was not found in PATH.").arg(toolName));
+        return;
+    }
+
+    auto *process = new QProcess(this);
+    const auto output = QSharedPointer<QString>::create();
+    const auto errors = QSharedPointer<QString>::create();
+
+    connect(process, &QProcess::readyReadStandardOutput, this, [process, output]() {
+        *output += QString::fromUtf8(process->readAllStandardOutput());
+    });
+
+    connect(process, &QProcess::readyReadStandardError, this, [process, errors]() {
+        *errors += QString::fromUtf8(process->readAllStandardError());
+    });
+
+        connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this, process, output, errors, isWindows](int exitCode, QProcess::ExitStatus) {
+                const QString combined = *output + '\n' + *errors;
+                process->deleteLater();
+
+                if (exitCode != 0 && combined.trimmed().isEmpty()) {
+                    m_wifiSsidValue->setText("Unavailable");
+                    m_wifiSignalValue->setText("Unavailable");
+                    m_wifiRadioValue->setText("Unavailable");
+                    appendConsoleEvent("ERROR: Failed to read Wi-Fi status.");
+                    return;
+                }
+
+                QString ssid = "Unknown";
+                QString signal = "Not available";
+                QString radio = "Not available";
+                QString state = "Unknown";
+
+                if (isWindows) {
+                    const QRegularExpression ssidRegex(R"(^\s*SSID(?:\s+\d+)?\s*:\s*(.+)$)",
+                                                       QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+                    const QRegularExpression signalRegex(R"(^\s*Signal\s*:\s*(\d+)%$)",
+                                                         QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+                    const QRegularExpression radioRegex(R"(^\s*Radio type\s*:\s*(.+)$)",
+                                                        QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+                    const QRegularExpression stateRegex(R"(^\s*State\s*:\s*(.+)$)",
+                                                        QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+
+                    const QRegularExpressionMatch ssidMatch = ssidRegex.match(combined);
+                    if (ssidMatch.hasMatch()) {
+                        ssid = ssidMatch.captured(1).trimmed();
+                    }
+
+                    const QRegularExpressionMatch signalMatch = signalRegex.match(combined);
+                    if (signalMatch.hasMatch()) {
+                        signal = signalMatch.captured(1).trimmed() + "%";
+                    }
+
+                    const QRegularExpressionMatch radioMatch = radioRegex.match(combined);
+                    if (radioMatch.hasMatch()) {
+                        radio = radioMatch.captured(1).trimmed();
+                    }
+
+                    const QRegularExpressionMatch stateMatch = stateRegex.match(combined);
+                    if (stateMatch.hasMatch()) {
+                        state = stateMatch.captured(1).trimmed();
+                    }
+                } else {
+                    const QRegularExpression ssidRegex("ESSID:\"([^\"]*)\"", QRegularExpression::CaseInsensitiveOption);
+                    const QRegularExpression levelRegex("(?:Signal level|Link Quality)=([^\\r\\n]+)", QRegularExpression::CaseInsensitiveOption);
+                    const QRegularExpression modeRegex("Mode:([^\\s]+)", QRegularExpression::CaseInsensitiveOption);
+
+                    const QRegularExpressionMatch ssidMatch = ssidRegex.match(combined);
+                    if (ssidMatch.hasMatch()) {
+                        ssid = ssidMatch.captured(1).trimmed();
+                    }
+
+                    const QRegularExpressionMatch levelMatch = levelRegex.match(combined);
+                    if (levelMatch.hasMatch()) {
+                        signal = levelMatch.captured(1).trimmed();
+                    }
+
+                    const QRegularExpressionMatch modeMatch = modeRegex.match(combined);
+                    if (modeMatch.hasMatch()) {
+                        radio = modeMatch.captured(1).trimmed();
+                    }
+                    state = combined.contains("ESSID:\"off/any\"", Qt::CaseInsensitive) ? "Disconnected" : "Connected";
+                }
+
+                m_wifiSsidValue->setText(ssid);
+                m_wifiSignalValue->setText(signal);
+                m_wifiRadioValue->setText(QString("%1 (%2)").arg(radio, state));
+                if (m_wifiLog != nullptr) {
+                    m_wifiLog->appendPlainText(QString("Wi-Fi status: SSID=%1, Signal=%2, Radio=%3, State=%4")
+                                                   .arg(ssid, signal, radio, state));
+                }
+                appendConsoleEvent(QString("INFO: Wi-Fi checked (%1, %2). ").arg(ssid, signal));
+            });
+
+    if (isWindows) {
+        process->start(command, {"wlan", "show", "interfaces"});
+    } else {
+        process->start(command, {});
+    }
+}
+
+void MainWindow::runSpeedTest()
+{
+    if (m_wifiLog != nullptr) {
+        m_wifiLog->appendPlainText("Running speed test...");
+    }
+    m_speedTestValue->setText("Running...");
+
+    const bool isWindows = QSysInfo::productType().contains("windows", Qt::CaseInsensitive);
+    const QString speedtest = isWindows ? QStandardPaths::findExecutable("speedtest")
+                                        : (!QStandardPaths::findExecutable("speedtest-cli").isEmpty()
+                                               ? QStandardPaths::findExecutable("speedtest-cli")
+                                               : QStandardPaths::findExecutable("speedtest"));
+    if (speedtest.isEmpty()) {
+        m_speedTestValue->setText("Speed test tool not found");
+        if (m_wifiLog != nullptr) {
+            m_wifiLog->appendPlainText("Speed test unavailable: no speedtest CLI was found in PATH.");
+        }
+        appendConsoleEvent("WARN: no speedtest CLI was found in PATH.");
+        return;
+    }
+
+    auto *process = new QProcess(this);
+    const auto output = QSharedPointer<QString>::create();
+    const auto errors = QSharedPointer<QString>::create();
+
+    connect(process, &QProcess::readyReadStandardOutput, this, [process, output]() {
+        *output += QString::fromUtf8(process->readAllStandardOutput());
+    });
+
+    connect(process, &QProcess::readyReadStandardError, this, [process, errors]() {
+        *errors += QString::fromUtf8(process->readAllStandardError());
+    });
+
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this, process, output, errors](int exitCode, QProcess::ExitStatus) {
+                const QString combined = *output + '\n' + *errors;
+                process->deleteLater();
+
+                const QJsonDocument jsonDocument = QJsonDocument::fromJson(combined.toUtf8());
+                if (jsonDocument.isObject()) {
+                    const QJsonObject root = jsonDocument.object();
+                    double downloadMbps = 0.0;
+                    double uploadMbps = 0.0;
+                    double latencyMs = 0.0;
+
+                    if (root.value("download").isObject()) {
+                        const QJsonObject download = root.value("download").toObject();
+                        const QJsonObject upload = root.value("upload").toObject();
+                        const QJsonObject ping = root.value("ping").toObject();
+                        downloadMbps = download.value("bandwidth").toDouble() * 8.0 / 1000000.0;
+                        uploadMbps = upload.value("bandwidth").toDouble() * 8.0 / 1000000.0;
+                        latencyMs = ping.value("latency").toDouble();
+                    } else {
+                        downloadMbps = root.value("download").toDouble() / 1000000.0;
+                        uploadMbps = root.value("upload").toDouble() / 1000000.0;
+                        latencyMs = root.value("ping").toDouble();
+                    }
+
+                    m_speedTestValue->setText(QString("Down %1 Mbps | Up %2 Mbps | Ping %3 ms")
+                                                  .arg(QString::number(downloadMbps, 'f', 2),
+                                                       QString::number(uploadMbps, 'f', 2),
+                                                       QString::number(latencyMs, 'f', 0)));
+                    if (m_wifiLog != nullptr) {
+                        m_wifiLog->appendPlainText(QString("Speed test: download %1 Mbps, upload %2 Mbps, ping %3 ms")
+                                                       .arg(QString::number(downloadMbps, 'f', 2),
+                                                            QString::number(uploadMbps, 'f', 2),
+                                                            QString::number(latencyMs, 'f', 0)));
+                    }
+                    appendConsoleEvent("INFO: Speed test completed.");
+                    return;
+                }
+
+                const QRegularExpression downloadRegex(R"(Download:\s*([0-9.]+)\s*Mbps)", QRegularExpression::CaseInsensitiveOption);
+                const QRegularExpression uploadRegex(R"(Upload:\s*([0-9.]+)\s*Mbps)", QRegularExpression::CaseInsensitiveOption);
+                const QRegularExpression pingRegex(R"((?:Latency|Ping):\s*([0-9.]+)\s*ms)", QRegularExpression::CaseInsensitiveOption);
+
+                const QString download = downloadRegex.match(combined).captured(1);
+                const QString upload = uploadRegex.match(combined).captured(1);
+                const QString ping = pingRegex.match(combined).captured(1);
+
+                if (!download.isEmpty() || !upload.isEmpty() || !ping.isEmpty()) {
+                    m_speedTestValue->setText(QString("Down %1 Mbps | Up %2 Mbps | Ping %3 ms")
+                                                  .arg(download.isEmpty() ? "?" : download,
+                                                       upload.isEmpty() ? "?" : upload,
+                                                       ping.isEmpty() ? "?" : ping));
+                    if (m_wifiLog != nullptr) {
+                        m_wifiLog->appendPlainText(QString("Speed test: download %1 Mbps, upload %2 Mbps, ping %3 ms")
+                                                       .arg(download.isEmpty() ? "?" : download,
+                                                            upload.isEmpty() ? "?" : upload,
+                                                            ping.isEmpty() ? "?" : ping));
+                    }
+                    appendConsoleEvent("INFO: Speed test completed.");
+                    return;
+                }
+
+                m_speedTestValue->setText("Speed test failed");
+                if (m_wifiLog != nullptr) {
+                    m_wifiLog->appendPlainText(combined.trimmed().isEmpty() ? "Speed test failed." : combined.trimmed());
+                }
+                if (exitCode != 0) {
+                    appendConsoleEvent("ERROR: Speed test command failed.");
+                } else {
+                    appendConsoleEvent("WARN: Speed test output could not be parsed.");
+                }
+            });
+
+    const QStringList args = isWindows
+                                 ? QStringList{"-f", "json", "--accept-license", "--accept-gdpr"}
+                                 : QStringList{"--json"};
+    process->start(speedtest, args);
 }
